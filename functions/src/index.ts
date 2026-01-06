@@ -1,4 +1,7 @@
-import * as functions from 'firebase-functions';
+import * as logger from 'firebase-functions/logger';
+import {onRequest} from 'firebase-functions/v2/https';
+import {onDocumentCreated} from 'firebase-functions/v2/firestore';
+import {onSchedule} from 'firebase-functions/v2/scheduler';
 import * as admin from 'firebase-admin';
 
 admin.initializeApp();
@@ -6,233 +9,196 @@ admin.initializeApp();
 const db = admin.firestore();
 const auth = admin.auth();
 
-// ========================================
-// 1. Validate Email Domain on User Creation
-// ========================================
-export const onUserCreate = functions.auth.user().onCreate(async (user) => {
-  const email = user.email;
+export const onUserCreate = onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
   
-  console.log(`New user attempting to register: ${email}`);
-  
-  // Check if email ends with @tigongolfcarts.com
-  if (!email || !email.endsWith('@tigongolfcarts.com')) {
-    console.log(`Invalid email domain: ${email}. Deleting user.`);
-    
-    // Delete user if email is invalid
-    await auth.deleteUser(user.uid);
-    
-    throw new functions.https.HttpsError(
-      'invalid-argument',
-      'Only @tigongolfcarts.com email addresses are allowed'
-    );
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
   }
   
-  // Create user document in Firestore
-  await db.collection('users').doc(user.uid).set({
-    email: email,
-    emailVerified: user.emailVerified,
-    createdAt: admin.firestore.FieldValue.serverTimestamp(),
-    lastLogin: admin.firestore.FieldValue.serverTimestamp(),
-    role: 'user'
-  });
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.status(401).json({error: 'Unauthorized'});
+    return;
+  }
   
-  console.log(`User created successfully: ${email}`);
-  return null;
-});
-
-// ========================================
-// 2. Send FCM Notification When New Notification Created
-// ========================================
-export const onNotificationCreate = functions.firestore
-  .document('notifications/{notificationId}')
-  .onCreate(async (snap, context) => {
-    const notification = snap.data();
-    const targetUserId = notification.targetUserId;
+  const token = authHeader.split('Bearer ')[1];
+  
+  try {
+    const decodedToken = await auth.verifyIdToken(token);
+    const uid = decodedToken.uid;
+    const email = decodedToken.email;
     
-    console.log(`New notification created for user: ${targetUserId}`);
+    logger.info('Creating user document for:', email);
     
-    // Get all active master devices for this user
-    const devicesSnapshot = await db
-      .collection('devices')
-      .where('userId', '==', targetUserId)
-      .where('deviceType', '==', 'master')
-      .where('isActive', '==', true)
-      .get();
-    
-    if (devicesSnapshot.empty) {
-      console.log('No active master devices found');
-      return null;
+    if (!email || !email.endsWith('@tigongolfcarts.com')) {
+      res.status(403).json({error: 'Only @tigongolfcarts.com email addresses are allowed'});
+      return;
     }
     
-    console.log(`Found ${devicesSnapshot.size} master device(s)`);
-    
-    // Collect FCM tokens
-    const fcmTokens: string[] = [];
-    devicesSnapshot.forEach(doc => {
-      const token = doc.data().fcmToken;
-      if (token) {
-        fcmTokens.push(token);
-        console.log(`Added FCM token for device: ${doc.id}`);
-      }
+    await db.collection('users').doc(uid).set({
+      email: email,
+      emailVerified: decodedToken.email_verified || false,
+      createdAt: admin.firestore.FieldValue.serverTimestamp(),
+      lastLogin: admin.firestore.FieldValue.serverTimestamp(),
+      role: 'user'
     });
     
-    if (fcmTokens.length === 0) {
-      console.log('No FCM tokens found');
-      return null;
-    }
-    
-    // Prepare notification message
-    const message = {
-      notification: {
-        title: `📱 ${notification.sourceDeviceName}`,
-        body: notification.text ? notification.text.substring(0, 100) : 'New notification',
-      },
-      data: {
-        notificationId: context.params.notificationId,
-        sourceDeviceName: notification.sourceDeviceName || 'Unknown Device',
-        timestamp: notification.timestamp?.toDate?.()?.toISOString() || new Date().toISOString(),
-      },
-      tokens: fcmTokens,
-    };
-    
-    // Send notification
-    try {
-      const response = await admin.messaging().sendEachForMulticast(message);
-      console.log(`Successfully sent ${response.successCount} message(s)`);
-      
-      if (response.failureCount > 0) {
-        console.log(`Failed to send ${response.failureCount} message(s)`);
-        response.responses.forEach((resp, idx) => {
-          if (!resp.success) {
-            console.error(`Error sending to token ${idx}:`, resp.error);
-          }
-        });
-      }
-      
-      return response;
-    } catch (error) {
-      console.error('Error sending FCM:', error);
-      throw error;
+    logger.info('User document created successfully:', email);
+    res.status(200).json({success: true, uid: uid});
+  } catch (error) {
+    logger.error('Error creating user document:', error);
+    res.status(500).json({error: 'Failed to create user document'});
+  }
+});
+
+export const onNotificationCreate = onDocumentCreated('notifications/{notificationId}', async (event) => {
+  const snapshot = event.data;
+  if (!snapshot) {
+    logger.warn('No data associated with the event');
+    return;
+  }
+  const notification = snapshot.data();
+  const targetUserId = notification.targetUserId;
+  logger.info('New notification created for user:', targetUserId);
+  const devicesSnapshot = await db.collection('devices').where('userId', '==', targetUserId).where('deviceType', '==', 'master').where('isActive', '==', true).get();
+  if (devicesSnapshot.empty) {
+    logger.info('No active master devices found');
+    return;
+  }
+  logger.info('Found master devices:', devicesSnapshot.size);
+  const fcmTokens: string[] = [];
+  devicesSnapshot.forEach((doc: any) => {
+    const token = doc.data().fcmToken;
+    if (token) {
+      fcmTokens.push(token);
     }
   });
-
-// ========================================
-// 3. Validate Email Domain (Callable Function)
-// ========================================
-export const validateEmailDomain = functions.https.onCall((data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError(
-      'unauthenticated',
-      'User must be authenticated'
-    );
+  if (fcmTokens.length === 0) {
+    logger.info('No FCM tokens found');
+    return;
   }
-  
-  const email = context.auth.token.email;
-  
-  if (!email || !email.endsWith('@tigongolfcarts.com')) {
-    throw new functions.https.HttpsError(
-      'permission-denied',
-      'Only @tigongolfcarts.com email addresses are allowed'
-    );
-  }
-  
-  return { 
-    valid: true, 
-    email: email 
+  const message = {
+    notification: {
+      title: 'TIGON IOT: ' + (notification.sourceDeviceName || 'Unknown Device'),
+      body: notification.text ? notification.text.substring(0, 100) : 'New notification',
+    },
+    data: {
+      notificationId: event.params.notificationId,
+      sourceDeviceName: notification.sourceDeviceName || 'Unknown Device',
+      timestamp: new Date().toISOString(),
+    },
+    tokens: fcmTokens,
   };
+  try {
+    const response = await admin.messaging().sendEachForMulticast(message);
+    logger.info('Successfully sent messages:', response.successCount);
+    return response;
+  } catch (error) {
+    logger.error('Error sending FCM:', error);
+    throw error;
+  }
 });
 
-// ========================================
-// 4. Get Latest App Version (Callable Function)
-// ========================================
-export const getLatestAppVersion = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError(
-      'unauthenticated',
-      'User must be authenticated'
-    );
+export const validateEmailDomain = onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
   }
-  
-  const versionDoc = await db
-    .collection('appVersions')
-    .doc('android')
-    .get();
-  
-  if (!versionDoc.exists) {
-    throw new functions.https.HttpsError(
-      'not-found',
-      'Version info not found'
-    );
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.status(401).json({error: 'Unauthorized'});
+    return;
   }
-  
-  return versionDoc.data();
+  const token = authHeader.split('Bearer ')[1];
+  try {
+    const decodedToken = await auth.verifyIdToken(token);
+    const email = decodedToken.email;
+    if (!email || !email.endsWith('@tigongolfcarts.com')) {
+      res.status(403).json({error: 'Only @tigongolfcarts.com email addresses are allowed'});
+      return;
+    }
+    res.status(200).json({valid: true, email: email});
+  } catch (error) {
+    logger.error('Error verifying token:', error);
+    res.status(401).json({error: 'Invalid token'});
+  }
 });
 
-// ========================================
-// 5. Clean Up Old Notifications (Scheduled - Daily)
-// ========================================
-export const cleanupOldNotifications = functions.pubsub
-  .schedule('every 24 hours')
-  .timeZone('America/New_York')
-  .onRun(async (context) => {
-    console.log('Starting cleanup of old notifications');
-    
-    const thirtyDaysAgo = new Date();
-    thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
-    
-    const snapshot = await db
-      .collection('notifications')
-      .where('createdAt', '<', admin.firestore.Timestamp.fromDate(thirtyDaysAgo))
-      .get();
-    
-    if (snapshot.empty) {
-      console.log('No old notifications to delete');
-      return null;
-    }
-    
-    console.log(`Found ${snapshot.size} old notification(s) to delete`);
-    
-    // Delete in batches (Firestore limit is 500 per batch)
-    const batchSize = 500;
-    let deletedCount = 0;
-    
-    while (!snapshot.empty) {
-      const batch = db.batch();
-      const docsToDelete = snapshot.docs.slice(0, batchSize);
-      
-      docsToDelete.forEach(doc => {
-        batch.delete(doc.ref);
-      });
-      
-      await batch.commit();
-      deletedCount += docsToDelete.length;
-      
-      console.log(`Deleted ${docsToDelete.length} notifications`);
-      
-      // Remove processed docs
-      snapshot.docs.splice(0, batchSize);
-    }
-    
-    console.log(`Cleanup complete. Total deleted: ${deletedCount}`);
-    return null;
-  });
-
-// ========================================
-// 6. Update User Last Login (Callable Function)
-// ========================================
-export const updateLastLogin = functions.https.onCall(async (data, context) => {
-  if (!context.auth) {
-    throw new functions.https.HttpsError(
-      'unauthenticated',
-      'User must be authenticated'
-    );
+export const getLatestAppVersion = onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'GET');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
   }
-  
-  const userId = context.auth.uid;
-  
-  await db.collection('users').doc(userId).update({
-    lastLogin: admin.firestore.FieldValue.serverTimestamp()
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.status(401).json({error: 'Unauthorized'});
+    return;
+  }
+  const token = authHeader.split('Bearer ')[1];
+  try {
+    await auth.verifyIdToken(token);
+    const versionDoc = await db.collection('appVersions').doc('android').get();
+    if (!versionDoc.exists) {
+      res.status(404).json({error: 'Version info not found'});
+      return;
+    }
+    res.status(200).json(versionDoc.data());
+  } catch (error) {
+    logger.error('Error getting version:', error);
+    res.status(401).json({error: 'Invalid token'});
+  }
+});
+
+export const cleanupOldNotifications = onSchedule({schedule: 'every 24 hours', timeZone: 'America/New_York'}, async (event) => {
+  logger.info('Starting cleanup of old notifications');
+  const thirtyDaysAgo = new Date();
+  thirtyDaysAgo.setDate(thirtyDaysAgo.getDate() - 30);
+  const snapshot = await db.collection('notifications').where('createdAt', '<', admin.firestore.Timestamp.fromDate(thirtyDaysAgo)).get();
+  if (snapshot.empty) {
+    logger.info('No old notifications to delete');
+    return;
+  }
+  logger.info('Found old notifications:', snapshot.size);
+  const batch = db.batch();
+  snapshot.docs.forEach((doc: any) => {
+    batch.delete(doc.ref);
   });
-  
-  return { success: true };
+  await batch.commit();
+  logger.info('Cleanup complete. Deleted:', snapshot.size);
+  return;
+});
+
+export const updateLastLogin = onRequest(async (req, res) => {
+  res.set('Access-Control-Allow-Origin', '*');
+  res.set('Access-Control-Allow-Methods', 'POST');
+  res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization');
+  if (req.method === 'OPTIONS') {
+    res.status(204).send('');
+    return;
+  }
+  const authHeader = req.headers.authorization;
+  if (!authHeader || !authHeader.startsWith('Bearer ')) {
+    res.status(401).json({error: 'Unauthorized'});
+    return;
+  }
+  const token = authHeader.split('Bearer ')[1];
+  try {
+    const decodedToken = await auth.verifyIdToken(token);
+    const userId = decodedToken.uid;
+    await db.collection('users').doc(userId).update({lastLogin: admin.firestore.FieldValue.serverTimestamp()});
+    res.status(200).json({success: true});
+  } catch (error) {
+    logger.error('Error updating last login:', error);
+    res.status(401).json({error: 'Invalid token'});
+  }
 });
