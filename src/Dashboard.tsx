@@ -40,6 +40,7 @@ const Dashboard: React.FC = () => {
   useEffect(() => {
     if (!currentUser) return;
 
+    // Real-time listener for notifications
     const q = query(
       collection(db, 'notifications'),
       where('targetUserId', '==', currentUser.uid),
@@ -54,6 +55,7 @@ const Dashboard: React.FC = () => {
       });
       setNotifications(notifs);
       
+      // Calculate stats
       const unhandled = notifs.filter(n => !n.isHandled).length;
       const handled = notifs.filter(n => n.isHandled).length;
       setStats({ total: notifs.length, unhandled, handled });
@@ -95,6 +97,7 @@ const Dashboard: React.FC = () => {
           Dashboard
         </Typography>
 
+        {/* Stats Cards */}
         <Grid container spacing={3} sx={{ mb: 4 }}>
           <Grid item xs={12} sm={4}>
             <Card sx={{ bgcolor: 'primary.light', color: 'white' }}>
@@ -143,6 +146,7 @@ const Dashboard: React.FC = () => {
           </Grid>
         </Grid>
 
+        {/* Notifications Feed */}
         <Paper sx={{ p: 3 }}>
           <Box sx={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', mb: 2 }}>
             <Typography variant="h5" color="primary">
