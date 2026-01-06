@@ -6,8 +6,10 @@ import { theme } from './theme/theme';
 import Login from './pages/Login';
 import Register from './pages/Register';
 import Dashboard from './pages/Dashboard';
+import Devices from './pages/Devices';
+import Settings from './pages/Settings';
+import Download from './pages/Download';
 
-// Protected Route Component
 const ProtectedRoute = ({ children }: { children: React.ReactNode }) => {
   const { currentUser } = useAuth();
   
@@ -32,18 +34,42 @@ function AppContent() {
   return (
     <Router>
       <Routes>
-        <Route path="/login" element={<Login />} />
-        <Route path="/register" element={<Register />} />
-        <Route
-          path="/dashboard"
-          element={
-            <ProtectedRoute>
-              <Dashboard />
-            </ProtectedRoute>
-          }
-        />
-        <Route path="/" element={<Navigate to="/dashboard" />} />
-      </Routes>
+  <Route path="/login" element={<Login />} />
+  <Route path="/register" element={<Register />} />
+  <Route
+    path="/dashboard"
+    element={
+      <ProtectedRoute>
+        <Dashboard />
+      </ProtectedRoute>
+    }
+  />
+  <Route
+    path="/devices"
+    element={
+      <ProtectedRoute>
+        <Devices />
+      </ProtectedRoute>
+    }
+  />
+  <Route
+    path="/settings"
+    element={
+      <ProtectedRoute>
+        <Settings />
+      </ProtectedRoute>
+    }
+  />
+<Route
+  path="/download"
+  element={
+    <ProtectedRoute>
+      <Download />
+    </ProtectedRoute>
+  }
+/>
+  <Route path="/" element={<Navigate to="/dashboard" />} />
+</Routes>
     </Router>
   );
 }
