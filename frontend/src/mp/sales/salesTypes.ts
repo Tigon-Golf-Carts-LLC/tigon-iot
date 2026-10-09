@@ -202,6 +202,8 @@ export interface Quote {
   accessories: number;
   prepFee: number;
   deliveryFee: number;
+  /** Delivery over 4 hours goes by 3rd-party carrier: price to be confirmed (not in deliveryFee / otd). */
+  deliveryTbc?: boolean;
   militaryDiscount: number;
   salesTax: number;
   otd: number;

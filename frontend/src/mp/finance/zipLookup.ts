@@ -93,6 +93,34 @@ export function findPlace(input: string): Place | null {
   return c ? toPlace(c) : null;
 }
 
+/**
+ * Best guess for whatever was typed, so the drive time always fills in: a ZIP anywhere in it (full address,
+ * "Lecanto FL 34461"), "City, ST" from the end of an address, a city name alone (the largest place with that
+ * name), and finally the first suggestion for a partly typed name. null only when nothing matches at all.
+ */
+export function guessPlace(input: string): Place | null {
+  const s = input.trim().replace(/\s+/g, ' ');
+  if (!s) return null;
+  const exact = findPlace(s);
+  if (exact) return exact;
+  const zip = [...s.matchAll(/\b(\d{5})(?:-\d{4})?\b/g)].map((m) => byZip.get(m[1])).filter(Boolean).pop();
+  if (zip) return zip;
+  // "street, City, ST 12345" → try the last two comma parts, without any ZIP.
+  const parts = s.replace(/\b\d{5}(?:-\d{4})?\b/g, '').split(',').map((x) => x.trim()).filter(Boolean);
+  if (parts.length >= 2) {
+    const tail = findPlace(`${parts[parts.length - 2]}, ${parts[parts.length - 1]}`);
+    if (tail) return tail;
+  }
+  const noZip = parts.join(', ');
+  const cs = findPlace(noZip);
+  if (cs) return cs;
+  // City alone: the largest place with exactly that name.
+  const n = normCity(noZip.replace(/,/g, ' '));
+  const named = cityList.find((c) => normCity(c.city) === n);
+  if (named) return toPlace(named);
+  return suggestPlaces(s)[0] || null;
+}
+
 /** Up to 6 places as the salesperson types (3+ letters), largest cities first, narrowed by a typed state. */
 export function suggestPlaces(input: string): Place[] {
   const s = input.trim();

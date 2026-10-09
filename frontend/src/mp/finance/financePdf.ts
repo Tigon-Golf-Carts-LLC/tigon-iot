@@ -18,7 +18,11 @@ export interface SheetInput {
   cartTitle?: string;
   /** Trade-in value (already taken off otd.loanAmount, like the down payment). */
   tradeIn?: number;
+  /** Delivery by 3rd-party carrier, price to be confirmed (not included in the totals). */
+  deliveryTbc?: boolean;
 }
+
+const TBC_NOTE = 'Delivery: price to be confirmed (3rd-party carrier) — not included in the prices above.';
 
 const money = (n: number) => n.toLocaleString('en-US', { style: 'currency', currency: 'USD' });
 const RED: [number, number, number] = [176, 30, 47];
@@ -67,6 +71,7 @@ async function build(input: SheetInput, scale: number) {
   if (input.accessories) parts.push(`accessories ${money(input.accessories)}`);
   if (input.prepFee) parts.push(`dealer prep ${money(input.prepFee)}`);
   if (input.deliveryFee) parts.push(`delivery ${money(input.deliveryFee)}`);
+  else if (input.deliveryTbc) parts.push('delivery to be confirmed (not included)');
   if (input.otd.militaryDiscount) parts.push(`military discount −${money(input.otd.militaryDiscount)}`);
   if (input.otd.salesTax) parts.push(`sales tax ${money(input.otd.salesTax)}`);
   doc.setFont('helvetica', 'normal').setFontSize(9.5).setTextColor(90, 90, 90);
@@ -106,6 +111,8 @@ async function build(input: SheetInput, scale: number) {
     },
   });
   y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 14;
+
+  if (input.deliveryTbc) y = tbcLine(doc, M, y, W);
 
   // Note box
   const note = 'These payments are estimates only. Your actual interest rate and monthly payment are set by the lender after a credit review, based on the credit tier you\'re approved for. The rates shown are for the highest credit tier, so your rate may be higher.';
@@ -176,6 +183,7 @@ export async function downloadOptionSheet(input: Omit<SheetInput, 'rows' | 'show
     ...(input.accessories ? [['Accessories', money(input.accessories)] as [string, string]] : []),
     ...(input.prepFee ? [['Dealer prep fee', money(input.prepFee)] as [string, string]] : []),
     ...(input.deliveryFee ? [['Delivery', money(input.deliveryFee)] as [string, string]] : []),
+    ...(input.deliveryTbc ? [['Delivery (3rd-party carrier)', 'To be confirmed'] as [string, string]] : []),
     ...(input.otd.militaryDiscount ? [['Military discount', `−${money(input.otd.militaryDiscount)}`] as [string, string]] : []),
     ...(input.otd.salesTax ? [['Sales tax', money(input.otd.salesTax)] as [string, string]] : []),
     ['Out-the-door price', money(input.otd.otd)],
@@ -207,6 +215,7 @@ export async function downloadOptionSheet(input: Omit<SheetInput, 'rows' | 'show
   });
   y = (doc as unknown as { lastAutoTable: { finalY: number } }).lastAutoTable.finalY + 14;
 
+  if (input.deliveryTbc) y = tbcLine(doc, M, y, W);
   const note = 'This payment is an estimate only. Your actual interest rate and monthly payment are set by the lender after a credit review, based on the credit tier you\'re approved for.';
   doc.setFont('helvetica', 'normal').setFontSize(9.5);
   const noteLines = doc.splitTextToSize(note, W - 2 * M - 24);
@@ -220,6 +229,15 @@ export async function downloadOptionSheet(input: Omit<SheetInput, 'rows' | 'show
 
   const slug = `${LENDER_LABEL[o.lender]}-${o.term}mo`.replace(/[^\w]+/g, '_');
   return savePdf(doc, `${input.brand.replace(/[^\w]+/g, '_')}-${slug}-${Math.round(input.otd.otd)}.pdf`);
+}
+
+/** Bold red "Delivery: price to be confirmed" line; returns the next y. */
+function tbcLine(doc: jsPDF, M: number, y: number, W: number): number {
+  doc.setFont('helvetica', 'bold').setFontSize(10.5).setTextColor(...RED);
+  const lines = doc.splitTextToSize(TBC_NOTE, W - 2 * M);
+  doc.text(lines, M, y + 4);
+  doc.setFont('helvetica', 'normal').setTextColor(40, 40, 40);
+  return y + lines.length * 13 + 10;
 }
 
 async function savePdf(doc: jsPDF, name: string) {

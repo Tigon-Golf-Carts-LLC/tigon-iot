@@ -84,6 +84,23 @@ export function estimateDriveMinutes(a: { lat: number; lng: number }, b: { lat: 
   return Math.round((road / mph) * 60 + 3);
 }
 
+/**
+ * Statewide sales tax rates for every other state (decimal). Many states add county / city tax on top
+ * (LOCAL_TAX_STATES) — the calculator fills the state rate and tells the salesperson to add the local part.
+ */
+const STATE_TAX: Record<string, number> = {
+  AL: 0.04, AK: 0, AZ: 0.056, AR: 0.065, CA: 0.0725, CO: 0.029, CT: 0.0635, DC: 0.06, FL: 0.06, GA: 0.04, HI: 0.04,
+  ID: 0.06, IL: 0.0625, IN: 0.07, IA: 0.06, KS: 0.065, KY: 0.06, LA: 0.05, ME: 0.055, MA: 0.0625, MI: 0.06, MN: 0.06875,
+  MS: 0.07, MO: 0.04225, MT: 0, NE: 0.055, NV: 0.0685, NH: 0, NM: 0.04875, NY: 0.04, NC: 0.0475, ND: 0.05, OH: 0.0575,
+  OK: 0.045, OR: 0, RI: 0.07, SC: 0.06, SD: 0.042, TN: 0.07, TX: 0.0625, UT: 0.061, VT: 0.06, VA: 0.053, WA: 0.065,
+  WV: 0.06, WI: 0.05, WY: 0.04,
+};
+/** States where counties / cities usually add their own sales tax on top of the state rate. */
+const LOCAL_TAX_STATES = new Set([
+  'AL', 'AK', 'AZ', 'AR', 'CA', 'CO', 'FL', 'GA', 'HI', 'ID', 'IL', 'IA', 'KS', 'LA', 'MN', 'MS', 'MO', 'NE', 'NV', 'NM',
+  'NY', 'NC', 'ND', 'OH', 'OK', 'SC', 'SD', 'TN', 'TX', 'UT', 'VT', 'VA', 'WA', 'WV', 'WI', 'WY',
+]);
+
 /** 2.5 Sales tax by state / county. null = unknown (salesperson types it). */
 export function taxRateFor(state: string | undefined, county: string | undefined): number | null {
   const st = (state || '').toUpperCase();
@@ -92,8 +109,11 @@ export function taxRateFor(state: string | undefined, county: string | undefined
   if (st === 'NJ') return 0.06625;
   if (st === 'DE') return 0;
   if (st === 'MD') return 0.06;
-  return null;
+  return st in STATE_TAX ? STATE_TAX[st] : null;
 }
+
+/** True when the rate from taxRateFor is the state rate only and a county / city tax may apply on top. */
+export const localTaxMayApply = (state: string | undefined) => LOCAL_TAX_STATES.has((state || '').toUpperCase());
 
 export interface OtdInput {
   cartPrice: number;

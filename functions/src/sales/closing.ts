@@ -320,7 +320,7 @@ function publicQuote(code: string, q: Json, now: number): Json {
   return {
     code, expired: !!q.expiresAt && Number(q.expiresAt) < now, cartTitle: str(q.cartTitle, 120), photo: httpsUrl(q.photo),
     videoUrl: httpsUrl(q.videoUrl), brand: str(q.brand, 60), cartPrice: num(q.cartPrice), accessories: num(q.accessories),
-    prepFee: num(q.prepFee), deliveryFee: num(q.deliveryFee), militaryDiscount: num(q.militaryDiscount), salesTax: num(q.salesTax),
+    prepFee: num(q.prepFee), deliveryFee: num(q.deliveryFee), deliveryTbc: q.deliveryTbc === true, militaryDiscount: num(q.militaryDiscount), salesTax: num(q.salesTax),
     otd: num(q.otd), downPayment: num(q.downPayment), tradeIn: num(q.tradeIn), loanAmount: num(q.loanAmount), rows,
     salespersonName: firstName(q.salespersonName), salespersonPhone: str(q.salespersonPhone, 30), store: storeInfo(storeId),
     customerFirst: q.customerName ? firstName(q.customerName) : '', createdAt: num(q.createdAt), expiresAt: num(q.expiresAt),

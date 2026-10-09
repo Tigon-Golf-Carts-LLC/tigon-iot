@@ -17,10 +17,10 @@ import type { LeadSalesFields } from '../sales/salesTypes';
 import SendQuoteDialog, { type QuoteDraft } from '../sales/closing/SendQuoteDialog';
 import {
   BRANDS, LENDER_LABEL, TIERS, brandLabel, buildResults, computeOtd, customerSheetRows, deliveryFee, estimateDriveMinutes, fmtDuration,
-  prepFeeFor, rateLabel, taxRateFor, termsFor,
+  localTaxMayApply, prepFeeFor, rateLabel, taxRateFor, termsFor,
 } from '../finance/financeCalc';
 import type { Brand, Condition, EvoModel, Quote } from '../finance/financeCalc';
-import { findPlace, loadZips, suggestPlaces } from '../finance/zipLookup';
+import { findPlace, guessPlace, loadZips, suggestPlaces } from '../finance/zipLookup';
 import type { Place } from '../finance/zipLookup';
 import { downloadCustomerSheet, downloadOptionSheet } from '../finance/financePdf';
 import { notify } from '../../ui/notify';
@@ -42,7 +42,13 @@ function parseMinutes(s: string): number | null {
   return Number.isFinite(n) && n > 0 ? Math.round(n) : null;
 }
 
-const STORES = DEALERSHIPS.filter((d) => /\b\d{5}\b/.test(d.address)).map((d) => ({ id: d.id, name: d.name, zip: (d.address.match(/\b(\d{5})\b(?!.*\b\d{5}\b)/) || [])[1] || '' }));
+/** Deliveries longer than this go by 3rd-party carrier (manager quotes the price). */
+const THIRD_PARTY_MINUTES = 4 * 60;
+const TBC_LABEL = 'Delivery (to be confirmed)';
+
+const STORES = DEALERSHIPS.filter((d) => /\b\d{5}\b/.test(d.address)).map((d) => ({
+  id: d.id, name: d.name, zip: (d.address.match(/\b(\d{5})\b(?!.*\b\d{5}\b)/) || [])[1] || '', lat: d.lat, lng: d.lng, cityState: d.cityState,
+}));
 const TAX_PRESETS: Array<{ id: string; label: string; rate: number }> = [
   { id: 'pa-phl', label: 'Pennsylvania, Philadelphia County — 8%', rate: 0.08 },
   { id: 'pa-alg', label: 'Pennsylvania, Allegheny County — 7%', rate: 0.07 },
@@ -120,8 +126,14 @@ const MpFinance: React.FC = () => {
   // Locations
   const store = STORES.find((s) => s.id === storeId);
   const storeZip = storeId === 'other' ? otherZip.trim() : store?.zip || '';
-  const storePlace: Place | null = zipsReady && /^\d{5}$/.test(storeZip) ? findPlace(storeZip) : null;
-  const destPlace: Place | null = zipsReady && mode === 'delivery' ? findPlace(dest) : null;
+  // Store: its ZIP, else its map location (so the drive time never waits on the ZIP table); "Other store": best guess.
+  const storePlace: Place | null = !zipsReady ? null
+    : storeId === 'other' ? guessPlace(storeZip)
+      : findPlace(storeZip) || (store?.lat && store.lng
+        ? { city: store.name, county: '', state: store.cityState.split(', ')[1] || '', lat: store.lat, lng: store.lng, label: store.cityState }
+        : null);
+  const destExact = zipsReady && mode === 'delivery' ? findPlace(dest) : null;
+  const destPlace: Place | null = zipsReady && mode === 'delivery' ? guessPlace(dest) : null;
   const suggestions = useMemo(() => (zipsReady ? suggestPlaces(dest) : []), [zipsReady, dest]);
 
   // Drive time + delivery fee
@@ -129,7 +141,11 @@ const MpFinance: React.FC = () => {
   const typedDrive = parseMinutes(driveOverride);
   const driveMinutes = mode === 'delivery' ? (typedDrive ?? estimate) : null;
   const fee = deliveryFee(driveMinutes);
-  const delivery = mode === 'delivery' ? (feeOverride.trim() ? num(feeOverride) : fee.fee) : 0;
+  // Over 4 hours we don't deliver ourselves: a 3rd-party carrier does, priced by a manager. Until the manager's
+  // quote is typed in, delivery is "to be confirmed": left out of the totals and marked on quotes and PDFs.
+  const thirdParty = driveMinutes !== null && driveMinutes > THIRD_PARTY_MINUTES;
+  const deliveryTbc = mode === 'delivery' && thirdParty && !feeOverride.trim();
+  const delivery = mode === 'delivery' && !deliveryTbc ? (feeOverride.trim() ? num(feeOverride) : fee.fee) : 0;
   // A new store or destination drops the typed drive time / fee.
   const locKey = `${mode}|${storeZip}|${destPlace?.label || ''}`;
   useEffect(() => { setDriveOverride(''); setFeeOverride(''); setTaxManual(null); }, [locKey]);
@@ -164,7 +180,7 @@ const MpFinance: React.FC = () => {
     try {
       const name = await downloadOptionSheet({
         brand: brandLabel(brand), otd, downPayment: num(down), cartPrice: num(price), accessories: num(accessories), prepFee,
-        deliveryFee: delivery, cartTitle: cartTitle || undefined, tradeIn: tradeIn || undefined, choice: selected,
+        deliveryFee: delivery, deliveryTbc, cartTitle: cartTitle || undefined, tradeIn: tradeIn || undefined, choice: selected,
       });
       notify(`Customer sheet ready: ${name}`, 'success');
     } catch (e) {
@@ -179,7 +195,7 @@ const MpFinance: React.FC = () => {
     try {
       const name = await downloadCustomerSheet({
         brand: brandLabel(brand), otd, downPayment: num(down), cartPrice: num(price), accessories: num(accessories), prepFee,
-        deliveryFee: delivery, rows: customerSheetRows(results), showRoadrunner: !!results.roadrunner, cartTitle: cartTitle || undefined,
+        deliveryFee: delivery, deliveryTbc, rows: customerSheetRows(results), showRoadrunner: !!results.roadrunner, cartTitle: cartTitle || undefined,
         tradeIn: tradeIn || undefined,
       });
       notify(`Customer sheet ready: ${name}`, 'success');
@@ -192,7 +208,7 @@ const MpFinance: React.FC = () => {
 
   const quoteDraft = (): QuoteDraft => ({
     cartId: cartId || undefined, cartTitle, photo: cartInfo?.photo || undefined, videoUrl: cartInfo?.video || undefined, brand: brandLabel(brand),
-    cartPrice: num(price), accessories: num(accessories), prepFee, deliveryFee: delivery, militaryDiscount: otd.militaryDiscount, salesTax: otd.salesTax,
+    cartPrice: num(price), accessories: num(accessories), prepFee, deliveryFee: delivery, ...(deliveryTbc ? { deliveryTbc: true } : {}), militaryDiscount: otd.militaryDiscount, salesTax: otd.salesTax,
     otd: otd.otd, downPayment: num(down), tradeIn, loanAmount: Math.max(otd.loanAmount, 0),
     rows: canFinance ? customerSheetRows(results).map((q) => ({
       lender: LENDER_LABEL[q.option.lender], rateLabel: rateLabel(q.option), term: q.option.term, payment: q.payment, totalOfPayments: q.totalOfPayments,
@@ -325,7 +341,9 @@ const MpFinance: React.FC = () => {
                   onInputChange={(_e, v) => setDest(v)}
                   renderInput={(p) => (
                     <TextField {...p} label="Destination (ZIP or City, ST)"
-                      helperText={!zipsReady ? 'Loading ZIP codes…' : destPlace ? `${destPlace.label}${destPlace.county ? ` · ${destPlace.county}` : ''}` : dest.trim() ? 'Not found — type a 5-digit ZIP or "City, ST"' : ' '} />
+                      helperText={!zipsReady ? 'Loading ZIP codes…' : destPlace
+                        ? `${destExact ? '' : 'Using '}${destPlace.label}${destPlace.county ? ` · ${destPlace.county}` : ''}${destExact ? '' : ' — check this is right'}`
+                        : dest.trim() ? 'Not found — type a ZIP or "City, ST"' : ' '} />
                   )} />
                 <Box sx={{ display: 'flex', gap: 1, alignItems: 'flex-start' }}>
                   <TextField size="small" fullWidth label="Drive time" value={driveOverride} placeholder={estimate ? fmtDuration(estimate) : 'e.g. 1:45'}
@@ -333,8 +351,16 @@ const MpFinance: React.FC = () => {
                     helperText={typedDrive !== null ? 'Using the time you entered' : estimate ? `Estimated ${fmtDuration(estimate)} — check Google Maps for long or rural trips` : 'Pick a destination, or type the Google Maps time'} />
                   {typedDrive !== null && estimate !== null && <Button size="small" sx={{ mt: 0.5, whiteSpace: 'nowrap' }} onClick={() => setDriveOverride('')}>Use estimate</Button>}
                 </Box>
-                <TextField size="small" label="Delivery fee" value={feeOverride || String(fee.fee)} onChange={(e) => setFeeOverride(e.target.value)} inputMode="decimal"
-                  helperText={feeOverride ? `Calculated: ${money(fee.fee)}` : fee.explain || ' '}
+                {thirdParty && (
+                  <Alert severity="warning">
+                    <b>Over 4 hours — contact your manager.</b> Deliveries this far go by a 3rd-party carrier, so the fee below
+                    isn't the real price. Get the delivery quote from your manager and type it in.
+                  </Alert>
+                )}
+                <TextField size="small" label="Delivery fee" value={feeOverride || (thirdParty ? '' : String(fee.fee))} onChange={(e) => setFeeOverride(e.target.value)} inputMode="decimal"
+                  placeholder={thirdParty ? 'Manager\'s quote' : undefined}
+                  color={deliveryTbc ? 'warning' : undefined} focused={deliveryTbc ? true : undefined}
+                  helperText={thirdParty ? (feeOverride ? 'Manager\'s 3rd-party quote' : 'To be confirmed — contact your manager for the 3rd-party price') : feeOverride ? `Calculated: ${money(fee.fee)}` : fee.explain || ' '}
                   slotProps={{ input: { startAdornment: <InputAdornment position="start">$</InputAdornment> } }} />
               </>
             )}
@@ -344,7 +370,10 @@ const MpFinance: React.FC = () => {
                 onChange={(e) => setTaxManual(e.target.value)} inputMode="decimal" error={taxMissing} />
               <TextField select size="small" fullWidth label="Tax location" value=""
                 onChange={(e) => { const p = TAX_PRESETS.find((x) => x.id === e.target.value); if (p) setTaxManual(String(+(p.rate * 100).toFixed(3))); }}
-                helperText={taxManual !== null ? 'Set by hand' : taxPlace ? `${taxPlace.county ? `${taxPlace.county}, ` : ''}${taxPlace.state}${taxMissing ? ' — enter the rate' : ''}` : ' '}>
+                helperText={taxManual !== null ? 'Set by hand' : taxPlace
+                  ? `${taxPlace.county ? `${taxPlace.county}, ` : ''}${taxPlace.state}${taxMissing ? ' — enter the rate'
+                    : localTaxMayApply(taxPlace.state) ? ' — state rate; add any county/city tax' : ''}`
+                  : ' '}>
                 {TAX_PRESETS.map((p) => <MenuItem key={p.id} value={p.id}>{p.label}</MenuItem>)}
               </TextField>
             </Box>
@@ -358,12 +387,13 @@ const MpFinance: React.FC = () => {
           <Table size="small" sx={{ mt: 2 }}>
             <TableBody>
               {([
-                ['Cart price', num(price)], ['Accessories', num(accessories)], ['Dealer prep fee', prepFee], ['Delivery', delivery],
+                ['Cart price', num(price)], ['Accessories', num(accessories)], ['Dealer prep fee', prepFee],
+                [deliveryTbc ? TBC_LABEL : 'Delivery', delivery],
                 ...(military ? [['Military discount', -200]] : []), ['Taxable amount', otd.taxable], [`Sales tax (${+(taxRate * 100).toFixed(3)}%)`, otd.salesTax],
               ] as Array<[string, number]>).map(([l, v]) => (
-                <TableRow key={l}><TableCell sx={{ border: 0, py: 0.25 }}>{l}</TableCell><TableCell align="right" sx={{ border: 0, py: 0.25 }}>{money(v)}</TableCell></TableRow>
+                <TableRow key={l}><TableCell sx={{ border: 0, py: 0.25 }}>{l}</TableCell><TableCell align="right" sx={{ border: 0, py: 0.25 }}>{l === TBC_LABEL ? 'TBC' : money(v)}</TableCell></TableRow>
               ))}
-              <TableRow><TableCell sx={{ fontWeight: 800 }}>Out-the-door price</TableCell><TableCell align="right" sx={{ fontWeight: 800 }}>{money(otd.otd)}</TableCell></TableRow>
+              <TableRow><TableCell sx={{ fontWeight: 800 }}>Out-the-door price{deliveryTbc ? ' (before delivery)' : ''}</TableCell><TableCell align="right" sx={{ fontWeight: 800 }}>{money(otd.otd)}</TableCell></TableRow>
               {tradeIn > 0 && <TableRow><TableCell sx={{ border: 0, py: 0.25 }}>Trade-in</TableCell><TableCell align="right" sx={{ border: 0, py: 0.25 }}>−{money(tradeIn)}</TableCell></TableRow>}
               {num(down) > 0 && <TableRow><TableCell sx={{ border: 0, py: 0.25 }}>Down payment</TableCell><TableCell align="right" sx={{ border: 0, py: 0.25 }}>−{money(num(down))}</TableCell></TableRow>}
               <TableRow><TableCell sx={{ fontWeight: 800, color: 'primary.main' }}>Loan amount</TableCell><TableCell align="right" sx={{ fontWeight: 800, color: 'primary.main' }}>{money(Math.max(otd.loanAmount, 0))}</TableCell></TableRow>
